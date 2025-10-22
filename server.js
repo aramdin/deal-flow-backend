@@ -36,6 +36,9 @@ if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASSWORD)
   });
 }
 
+// Handle OPTIONS requests for CORS preflight
+app.options('*', cors());
+
 // Health check
 app.get('/api/health', (req, res) => {
   res.json({ 
