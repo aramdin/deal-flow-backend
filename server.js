@@ -17,20 +17,27 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY
 );
 
-// Email transporter
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST,
-  port: parseInt(process.env.SMTP_PORT),
-  secure: false,
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASSWORD
-  }
-});
+// Email transporter (optional - only if SMTP credentials are provided)
+let transporter = null;
+if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASSWORD) {
+  transporter = nodemailer.createTransport({
+    host: process.env.SMTP_HOST,
+    port: parseInt(process.env.SMTP_PORT),
+    secure: false,
+    auth: {
+      user: process.env.SMTP_USER,
+      pass: process.env.SMTP_PASSWORD
+    }
+  });
+}
 
 // Health check
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  res.json({ 
+    status: 'ok', 
+    timestamp: new Date().toISOString(),
+    smtp_configured: !!transporter
+  });
 });
 
 // Middleware to verify Supabase JWT
@@ -120,10 +127,16 @@ app.delete('/api/deals/:id', verifyAuth, async (req, res) => {
   }
 });
 
-// Send outreach email
+// Send outreach email (with authentication - requires SMTP)
 app.post('/api/webhook/send-outreach', verifyAuth, async (req, res) => {
   try {
     const { dealId } = req.body;
+
+    if (!transporter) {
+      return res.status(503).json({ 
+        error: 'Email service not configured. Use external webhook instead.' 
+      });
+    }
 
     // Get deal details
     const { data: deal, error: dealError } = await supabase
@@ -193,6 +206,129 @@ app.post('/api/webhook/google-form', async (req, res) => {
 
     res.status(201).json({ message: 'Deal created from form', data });
   } catch (error) {
+    console.error('Google Form webhook error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// External webhook for Make.com / GoHighLevel (no auth required)
+// Use this to send deal info to external automation tools
+app.post('/api/webhook/outreach-external', async (req, res) => {
+  try {
+    // Optional: Check for webhook secret for security
+    if (process.env.WEBHOOK_SECRET) {
+      const secret = req.headers['x-webhook-secret'];
+      if (secret !== process.env.WEBHOOK_SECRET) {
+        return res.status(401).json({ error: 'Unauthorized' });
+      }
+    }
+
+    const { 
+      dealId, 
+      email, 
+      companyName, 
+      contactName, 
+      industry, 
+      fundingAmount,
+      description,
+      website
+    } = req.body;
+
+    // Log webhook
+    await supabase.from('webhook_logs').insert([{
+      business_idea_id: dealId || null,
+      action: 'outreach_external',
+      triggered_by: 'make_com_or_ghl',
+      status: 'success',
+      details: { 
+        email_sent_to: email,
+        company_name: companyName,
+        platform: req.headers['user-agent'] || 'unknown'
+      }
+    }]);
+
+    // Return success with deal data for Make.com/GHL to process
+    res.status(200).json({ 
+      success: true,
+      message: 'Webhook received successfully',
+      data: {
+        dealId,
+        email,
+        companyName,
+        contactName,
+        industry,
+        fundingAmount,
+        description,
+        website,
+        timestamp: new Date().toISOString()
+      }
+    });
+  } catch (error) {
+    console.error('External webhook error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Trigger external webhook for a deal (authenticated)
+// This endpoint is called from your dashboard to send deal info to Make.com/GHL
+app.post('/api/webhook/trigger-outreach', verifyAuth, async (req, res) => {
+  try {
+    const { dealId, webhookUrl } = req.body;
+
+    // Get deal details
+    const { data: deal, error: dealError } = await supabase
+      .from('business_ideas')
+      .select('*')
+      .eq('id', dealId)
+      .single();
+
+    if (dealError) throw dealError;
+
+    // If webhookUrl is provided, send data there
+    if (webhookUrl) {
+      const response = await fetch(webhookUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Webhook-Secret': process.env.WEBHOOK_SECRET || ''
+        },
+        body: JSON.stringify({
+          dealId: deal.id,
+          email: deal.contact_email,
+          companyName: deal.business_name,
+          contactName: deal.contact_name,
+          industry: deal.industry,
+          fundingAmount: deal.funding_amount_requested,
+          description: deal.description,
+          website: deal.website_url,
+          stage: deal.stage
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`Webhook failed: ${response.statusText}`);
+      }
+    }
+
+    // Log webhook
+    await supabase.from('webhook_logs').insert([{
+      business_idea_id: dealId,
+      action: 'trigger_outreach',
+      triggered_by: req.user.email,
+      status: 'success',
+      details: { 
+        webhook_url: webhookUrl,
+        company_name: deal.business_name 
+      }
+    }]);
+
+    res.json({ 
+      success: true,
+      message: 'Outreach triggered successfully',
+      deal: deal.business_name
+    });
+  } catch (error) {
+    console.error('Trigger outreach error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -256,5 +392,7 @@ app.get('/api/users', verifyAuth, async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`✅ Server running on port ${PORT}`);
+  console.log(`📧 SMTP configured: ${!!transporter}`);
+  console.log(`🔒 Webhook secret: ${!!process.env.WEBHOOK_SECRET}`);
 });
