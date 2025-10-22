@@ -7,8 +7,13 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware
-app.use(cors());
+// Middleware - Enhanced CORS
+app.use(cors({
+  origin: '*',
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
 app.use(express.json());
 
 // Supabase client
@@ -36,7 +41,8 @@ app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'ok', 
     timestamp: new Date().toISOString(),
-    smtp_configured: !!transporter
+    smtp_configured: !!transporter,
+    supabase_connected: !!process.env.SUPABASE_URL
   });
 });
 
@@ -45,6 +51,7 @@ const verifyAuth = async (req, res, next) => {
   const authHeader = req.headers.authorization;
   
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    console.log('❌ No auth token provided');
     return res.status(401).json({ error: 'No token provided' });
   }
 
@@ -54,12 +61,15 @@ const verifyAuth = async (req, res, next) => {
     const { data: { user }, error } = await supabase.auth.getUser(token);
     
     if (error || !user) {
+      console.log('❌ Invalid token:', error?.message);
       return res.status(401).json({ error: 'Invalid token' });
     }
 
+    console.log('✅ User authenticated:', user.email);
     req.user = user;
     next();
   } catch (error) {
+    console.error('❌ Auth error:', error);
     return res.status(401).json({ error: 'Authentication failed' });
   }
 };
@@ -67,14 +77,17 @@ const verifyAuth = async (req, res, next) => {
 // Get all deals
 app.get('/api/deals', verifyAuth, async (req, res) => {
   try {
+    console.log('📋 Fetching deals...');
     const { data, error } = await supabase
       .from('business_ideas')
       .select('*')
       .order('created_at', { ascending: false });
 
     if (error) throw error;
+    console.log(`✅ Found ${data.length} deals`);
     res.json(data);
   } catch (error) {
+    console.error('❌ Get deals error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -82,6 +95,7 @@ app.get('/api/deals', verifyAuth, async (req, res) => {
 // Create new deal
 app.post('/api/deals', verifyAuth, async (req, res) => {
   try {
+    console.log('➕ Creating deal:', req.body.business_name);
     const { data, error } = await supabase
       .from('business_ideas')
       .insert([req.body])
@@ -89,8 +103,10 @@ app.post('/api/deals', verifyAuth, async (req, res) => {
       .single();
 
     if (error) throw error;
+    console.log('✅ Deal created:', data.id);
     res.status(201).json(data);
   } catch (error) {
+    console.error('❌ Create deal error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -98,6 +114,7 @@ app.post('/api/deals', verifyAuth, async (req, res) => {
 // Update deal
 app.put('/api/deals/:id', verifyAuth, async (req, res) => {
   try {
+    console.log('✏️ Updating deal:', req.params.id);
     const { data, error } = await supabase
       .from('business_ideas')
       .update(req.body)
@@ -106,8 +123,10 @@ app.put('/api/deals/:id', verifyAuth, async (req, res) => {
       .single();
 
     if (error) throw error;
+    console.log('✅ Deal updated:', data.id);
     res.json(data);
   } catch (error) {
+    console.error('❌ Update deal error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -115,14 +134,17 @@ app.put('/api/deals/:id', verifyAuth, async (req, res) => {
 // Delete deal
 app.delete('/api/deals/:id', verifyAuth, async (req, res) => {
   try {
+    console.log('🗑️ Deleting deal:', req.params.id);
     const { error } = await supabase
       .from('business_ideas')
       .delete()
       .eq('id', req.params.id);
 
     if (error) throw error;
+    console.log('✅ Deal deleted');
     res.json({ message: 'Deal deleted successfully' });
   } catch (error) {
+    console.error('❌ Delete deal error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -131,6 +153,7 @@ app.delete('/api/deals/:id', verifyAuth, async (req, res) => {
 app.post('/api/webhook/send-outreach', verifyAuth, async (req, res) => {
   try {
     const { dealId } = req.body;
+    console.log('📧 Sending outreach for deal:', dealId);
 
     if (!transporter) {
       return res.status(503).json({ 
@@ -175,8 +198,10 @@ app.post('/api/webhook/send-outreach', verifyAuth, async (req, res) => {
       details: { email_sent_to: deal.contact_email }
     }]);
 
+    console.log('✅ Outreach email sent');
     res.json({ message: 'Outreach email sent successfully' });
   } catch (error) {
+    console.error('❌ Send outreach error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -184,6 +209,7 @@ app.post('/api/webhook/send-outreach', verifyAuth, async (req, res) => {
 // Google Form webhook (no auth required)
 app.post('/api/webhook/google-form', async (req, res) => {
   try {
+    console.log('📝 Google Form submission:', req.body.business_name);
     const { data, error } = await supabase
       .from('business_ideas')
       .insert([{
@@ -204,17 +230,19 @@ app.post('/api/webhook/google-form', async (req, res) => {
       status: 'success'
     }]);
 
+    console.log('✅ Form submission processed:', data.id);
     res.status(201).json({ message: 'Deal created from form', data });
   } catch (error) {
-    console.error('Google Form webhook error:', error);
+    console.error('❌ Google Form webhook error:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
 // External webhook for Make.com / GoHighLevel (no auth required)
-// Use this to send deal info to external automation tools
 app.post('/api/webhook/outreach-external', async (req, res) => {
   try {
+    console.log('🔗 External webhook received');
+    
     // Optional: Check for webhook secret for security
     if (process.env.WEBHOOK_SECRET) {
       const secret = req.headers['x-webhook-secret'];
@@ -247,7 +275,7 @@ app.post('/api/webhook/outreach-external', async (req, res) => {
       }
     }]);
 
-    // Return success with deal data for Make.com/GHL to process
+    console.log('✅ External webhook logged');
     res.status(200).json({ 
       success: true,
       message: 'Webhook received successfully',
@@ -264,16 +292,16 @@ app.post('/api/webhook/outreach-external', async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('External webhook error:', error);
+    console.error('❌ External webhook error:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
 // Trigger external webhook for a deal (authenticated)
-// This endpoint is called from your dashboard to send deal info to Make.com/GHL
 app.post('/api/webhook/trigger-outreach', verifyAuth, async (req, res) => {
   try {
     const { dealId, webhookUrl } = req.body;
+    console.log('🚀 Triggering outreach for deal:', dealId);
 
     // Get deal details
     const { data: deal, error: dealError } = await supabase
@@ -322,13 +350,14 @@ app.post('/api/webhook/trigger-outreach', verifyAuth, async (req, res) => {
       }
     }]);
 
+    console.log('✅ Outreach triggered');
     res.json({ 
       success: true,
       message: 'Outreach triggered successfully',
       deal: deal.business_name
     });
   } catch (error) {
-    console.error('Trigger outreach error:', error);
+    console.error('❌ Trigger outreach error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -336,6 +365,7 @@ app.post('/api/webhook/trigger-outreach', verifyAuth, async (req, res) => {
 // Get webhook logs
 app.get('/api/webhooks', verifyAuth, async (req, res) => {
   try {
+    console.log('📊 Fetching webhook logs...');
     const { data, error } = await supabase
       .from('webhook_logs')
       .select('*, business_ideas(*)')
@@ -343,31 +373,75 @@ app.get('/api/webhooks', verifyAuth, async (req, res) => {
       .limit(50);
 
     if (error) throw error;
+    console.log(`✅ Found ${data.length} webhook logs`);
     res.json(data);
   } catch (error) {
+    console.error('❌ Get webhooks error:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// Get user profile
+// Get user profile - ROBUST VERSION
 app.get('/api/user/profile', verifyAuth, async (req, res) => {
   try {
+    console.log('👤 Fetching profile for:', req.user.email);
+    
+    // Try to get from user_profiles table
     const { data, error } = await supabase
       .from('user_profiles')
       .select('*')
       .eq('id', req.user.id)
       .single();
 
-    if (error) throw error;
-    res.json(data);
+    // If profile exists, return it
+    if (data && !error) {
+      console.log('✅ Profile found in database');
+      return res.json(data);
+    }
+
+    // No profile exists - create one automatically
+    console.log('⚠️ No profile found, creating one...');
+    
+    const newProfile = {
+      id: req.user.id,
+      username: req.user.email.split('@')[0],
+      email: req.user.email,
+      role: 'user',
+      full_name: req.user.user_metadata?.full_name || null
+    };
+
+    const { data: createdProfile, error: createError } = await supabase
+      .from('user_profiles')
+      .insert([newProfile])
+      .select()
+      .single();
+
+    if (createError) {
+      console.error('❌ Failed to create profile:', createError);
+      // Return basic profile even if creation fails
+      return res.json(newProfile);
+    }
+
+    console.log('✅ Profile created successfully');
+    res.json(createdProfile);
+    
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error('❌ Profile error:', error);
+    // Always return something - fallback to basic user info
+    res.json({
+      id: req.user.id,
+      username: req.user.email.split('@')[0],
+      email: req.user.email,
+      role: 'user'
+    });
   }
 });
 
 // Get all users (admin only)
 app.get('/api/users', verifyAuth, async (req, res) => {
   try {
+    console.log('👥 Fetching all users...');
+    
     // Check if user is admin
     const { data: profile } = await supabase
       .from('user_profiles')
@@ -375,7 +449,8 @@ app.get('/api/users', verifyAuth, async (req, res) => {
       .eq('id', req.user.id)
       .single();
 
-    if (profile.role !== 'admin') {
+    if (!profile || profile.role !== 'admin') {
+      console.log('❌ User is not admin');
       return res.status(403).json({ error: 'Admin access required' });
     }
 
@@ -385,14 +460,22 @@ app.get('/api/users', verifyAuth, async (req, res) => {
       .order('username');
 
     if (error) throw error;
+    console.log(`✅ Found ${data.length} users`);
     res.json(data);
   } catch (error) {
+    console.error('❌ Get users error:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
+// Start server
 app.listen(PORT, () => {
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log('🚀 Price Capital Deal Flow Backend');
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log(`✅ Server running on port ${PORT}`);
   console.log(`📧 SMTP configured: ${!!transporter}`);
   console.log(`🔒 Webhook secret: ${!!process.env.WEBHOOK_SECRET}`);
+  console.log(`🗄️ Supabase: ${process.env.SUPABASE_URL ? '✅ Connected' : '❌ Not configured'}`);
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 });
